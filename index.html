@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="description" content="BSCSE 130-credit course tracker with browser auto-save, PDF export, and 14-credit pre-advising.">
+  <meta name="description" content="BSCSE 130-credit course tracker with Google sign-in, automatic cloud and local saving, PDF export and 14-credit pre-advising.">
   <title>BSCSE — Course Tracker & Pre-Advising</title>
   <style>
     :root { --ink:#162132; --muted:#627085; --line:#d4dae2; --light:#f4f7fb; --deep:#175c3c; --green:#def4e4; --green-border:#95d7ab; --shadow:0 5px 28px rgba(30,44,59,.075); }
@@ -185,6 +185,31 @@
 
     /* PDF EXPORT: browser print engine renders selectable text, live calculations,
        checked marks, course colors, progress graphics and pre-advising offline. */
+    .cloud-account[hidden]{display:none!important}
+    .cloud-account{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;background:#eef8f2;border:1px solid #bedfcb;border-radius:12px;padding:11px 15px;margin:14px 0 -7px}
+    .cloud-info{display:flex;flex-direction:column;gap:2px;min-width:200px}
+    .cloud-info strong{color:#16583b;font-size:13px}
+    .cloud-info span{color:#445f53;font-size:12px;overflow-wrap:anywhere}
+    .cloud-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+    .cloud-signin{background:#fff;border-color:#9cccb1;color:#15583c}
+    .cloud-signin:not(:disabled):hover{background:#e0f3e7}
+    .cloud-conflict[hidden]{display:none!important}
+    .cloud-conflict{position:fixed;inset:0;z-index:99;display:grid;place-items:center;background:rgba(10,23,36,.70);padding:16px}
+    .cloud-dialog{max-width:500px;width:100%;background:#fff;color:#172636;border-radius:17px;box-shadow:0 10px 70px #0005;padding:26px}
+    .cloud-dialog h2{font-size:22px;margin:0 0 10px}
+    .cloud-dialog p{font-size:14px;line-height:1.6;color:#445568}
+    .cloud-choices{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
+    .cloud-choices button{flex:1 1 180px}
+    .cloud-subnote{font-size:12px!important}
+    [data-theme="dark"] .cloud-account{background:#1c3a30;border-color:#406658}
+    [data-theme="dark"] .cloud-info strong{color:#a4f0c6}
+    [data-theme="dark"] .cloud-info span{color:#d0e5da}
+    [data-theme="dark"] .cloud-signin{background:#244638;color:#e7fff0;border-color:#56816a}
+    [data-theme="dark"] .cloud-signin:hover{background:#315e49}
+    [data-theme="dark"] .cloud-dialog{background:#1e2c3a;color:#f0f6fb}
+    [data-theme="dark"] .cloud-dialog p{color:#cfdae5}
+    [data-theme="dark"] .cloud-dialog button:not(.primary){background:#2a4155;color:#eff8ff;border-color:#587187}
+    @media(max-width:550px){.cloud-actions{width:100%}.cloud-actions button{flex:1}.cloud-dialog{padding:18px}}
     @page { size: A4 portrait; margin: 8mm 9mm 9mm; }
     @media print {
       html,body{scroll-behavior:auto!important}
@@ -200,7 +225,7 @@
       .developer-credit{display:inline-flex!important;font-size:9px!important;line-height:1.25!important;padding:4px 7px!important;white-space:nowrap!important}
       h1{font-size:19px!important;margin:6px 0 4px!important;letter-spacing:-.015em!important}
       .intro{font-size:10px!important;margin:0!important}
-      .theme-toggle,.toolbar,.save-guide,.toast,.help,.planner-note,.plan-message{display:none!important}
+      .theme-toggle,.toolbar,.cloud-account,.cloud-conflict,.save-guide,.toast,.help,.planner-note,.plan-message{display:none!important}
       .summary{display:grid!important;grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:6px!important;margin:10px 0 0!important;break-inside:avoid}
       .metric{padding:8px 9px!important;border-radius:9px!important;box-shadow:none!important}
       .metric .label{font-size:9px!important}
@@ -281,6 +306,28 @@
   </div>
   <h1>Semester-wise Subjective sequences of courses and Prerequisite list - BSCSE</h1>
   <p class="intro">Check a course when you complete it. Its entire row will turn green and its text will turn black.</p>
+  <section id="cloudAccount" class="cloud-account" aria-label="Google account and cloud sync">
+    <div class="cloud-info">
+      <strong id="cloudHeading">Google cloud backup</strong>
+      <span id="cloudStatus" role="status" aria-live="polite">Connecting to Firebase… (internet required for Google sign-in)</span>
+    </div>
+    <div class="cloud-actions">
+      <button type="button" id="googleSignIn" class="cloud-signin" disabled>Sign in with Google</button>
+      <button type="button" id="cloudSyncNow" hidden>↻ Sync now</button>
+      <button type="button" id="googleSignOut" hidden>Sign out</button>
+    </div>
+  </section>
+  <div id="cloudConflict" class="cloud-conflict" hidden role="dialog" aria-modal="true" aria-labelledby="cloudConflictTitle">
+    <div class="cloud-dialog">
+      <h2 id="cloudConflictTitle">Choose your course progress</h2>
+      <p>This browser and your Google account contain different selections. Choose which version to keep. The other version will not be used for this account.</p>
+      <div class="cloud-choices">
+        <button type="button" id="chooseCloud" class="primary">Use Google cloud progress</button>
+        <button type="button" id="chooseLocal">Use this browser's progress</button>
+      </div>
+      <p class="cloud-subnote">Your original guest browser copy is kept separately. Cloud progress is private to your Google account.</p>
+    </div>
+  </div>
 
   <section class="summary" aria-label="Your course progress">
     <div class="metric primary"><span class="label">Completed credits</span><strong id="completedCredits">0</strong></div>
@@ -336,7 +383,7 @@
     <p class="planner-note">A course already marked completed is labeled <strong>Retake</strong>. The 14-credit limit includes retakes. Requirements such as 60 or 100 completed credits are also checked. If you later untick a prerequisite, the planned course stays visible but is flagged for attention. Every change is included in your saved HTML file.</p>
   </section>
   <p class="help" id="helpLocal"><strong>Offline, portable progress:</strong> Once auto-save is connected, your completed courses, pre-advising selections, totals, and theme are stored directly in this HTML file. Opening the saved file in another browser displays the same information. Browser file-access permission is separate: you may need to authorize auto-save again after a browser change or permission reset. <strong>Save now</strong> writes your latest changes immediately; <strong>Export as PDF</strong> prints the current page. In browsers without direct file writing, Save now downloads an updated HTML copy. Do not edit the same file in two browser windows at once.</p>
-  <p class="help" id="helpHosted" hidden><strong>Online website storage:</strong> Your choices are automatically saved to this browser on this device, not to the public GitHub repository. Open this URL again in the same browser to restore them. <strong>Google sign-in and cross-device sync require Firebase setup</strong> and are not active in this version. Clearing browser storage can erase this copy. An HTML backup export remains implemented and can be made visible later.</p>
+  <p class="help" id="helpHosted" hidden><strong>Online website storage:</strong> Your choices are automatically saved to this browser on this device, not to the public GitHub repository. Open this URL again in the same browser to restore them. <strong>Sign in with Google for private cross-device cloud synchronization.</strong> Clearing browser storage can erase this copy. An HTML backup export remains implemented and can be made visible later.</p>
   <p class="footnote">BSCSE Curriculum – Approved by UGC, March 2015 – Effective from Spring 2018</p>
 </main>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -374,11 +421,13 @@ const STORAGE_NAME = 'BSCSE_autosave_file_handle_v1';
 // privately to this browser instead. Cloud sync needs an authenticated backend.
 const IS_HOSTED = location.protocol === 'https:' || location.protocol === 'http:';
 const BROWSER_STORAGE_KEY = 'bscse-course-tracker-progress-v1';
+window.BSCSEActiveUID = null;
+function activeStorageKey(){return window.BSCSEActiveUID ? BROWSER_STORAGE_KEY+'-user-'+window.BSCSEActiveUID : BROWSER_STORAGE_KEY;}
 let browserStorageError = null;
 function readBrowserProgress() {
   if (!IS_HOSTED) return null;
   try {
-    const data = localStorage.getItem(BROWSER_STORAGE_KEY);
+    const data = localStorage.getItem(activeStorageKey());
     return data ? normalize(JSON.parse(data)) : null;
   } catch (error) {
     browserStorageError = error;
@@ -390,11 +439,11 @@ function persistBrowserProgress(showNotice=false) {
   if (!IS_HOSTED) return false;
   try {
     const snapshot = getSnapshot();
-    localStorage.setItem(BROWSER_STORAGE_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(activeStorageKey(), JSON.stringify(snapshot));
     savedSnapshot = normalize(snapshot);
     browserStorageError = null;
     updateSaveState();
-    if (showNotice) toast('Saved in this browser', 'success');
+    if (showNotice) toast(window.BSCSEActiveUID ? 'Saved locally; cloud sync follows' : 'Saved in this browser', 'success');
     return true;
   } catch (error) {
     browserStorageError = error;
@@ -599,9 +648,9 @@ function updateButtons() {
     byId('changeFileBtn').hidden = true;
     byId('saveBtn').textContent = '💾 Save now';
     byId('trackerBadge').textContent = 'Course tracker';
-    byId('saveGuide').innerHTML = '<strong>Automatic browser saving is ON.</strong> Every course tick, pre-advising choice, and theme change is saved immediately on this browser and device. You can close and reopen this website without losing progress. <strong>Cross-device Google-account syncing is not set up yet.</strong> Browser data can be lost if you clear site data or use private browsing.';
+    byId('saveGuide').innerHTML = '<strong>Automatic browser saving is ON.</strong> Every course tick, pre-advising choice, and theme change is saved immediately on this browser and device. You can close and reopen this website without losing progress. <strong>Sign in with Google to sync across devices.</strong> Until you sign in, progress stays only in this browser. When signed in, your edits save locally first and synchronize to your private Google account while online.';
     byId('saveGuide').hidden = false;
-    byId('saveBtn').title = 'Save progress again in this browser';
+    byId('saveBtn').title = 'Save locally now and synchronize to Google if signed in';
     byId('downloadBtn').hidden = true;
     byId('importBtn').hidden = true;
     byId('helpHosted').hidden = false;
@@ -860,6 +909,7 @@ function enableAutoSave() {
 function queueAutoSave() {
   if (IS_HOSTED) {
     persistBrowserProgress();
+    window.BSCSECloud?.changed?.();
     return;
   }
   clearTimeout(saveTimer);
@@ -900,7 +950,7 @@ async function flushToFile(force=false) {
   toast('Saved to file','success');
 }
 async function saveNow() {
-  if (IS_HOSTED) { persistBrowserProgress(true); return; }
+  if (IS_HOSTED) { persistBrowserProgress(true); window.BSCSECloud?.saveNow?.(); return; }
   if(typeof window.showOpenFilePicker !== 'function') {
     startHtmlDownload(makePortableHtml(getSnapshot()),'BSCSE_Course_Map_Saved.html');
     toast('Saved HTML copy downloaded — open that copy next time');
@@ -971,8 +1021,183 @@ byId('importInput').addEventListener('change',importPreviousHtml);
 window.addEventListener('beforeunload',event=>{
   if(hasChanges()){event.preventDefault();event.returnValue='';}
 });
+window.BSCSEBridge = {
+  getSnapshot, normalize, sameSelection, applySnapshot, persistBrowserProgress,
+  readBrowserProgress, toast, setSaveState,
+  getGuestSnapshot() {
+    try { return normalize(JSON.parse(localStorage.getItem(BROWSER_STORAGE_KEY)||'null')); }
+    catch (_) { return null; }
+  },
+  getUserSnapshot(uid) {
+    try { return normalize(JSON.parse(localStorage.getItem(BROWSER_STORAGE_KEY+'-user-'+uid)||'null')); }
+    catch (_) { return null; }
+  },
+  switchToGuest() {
+    window.BSCSEActiveUID=null;
+    const guest=this.getGuestSnapshot()||{version:4,checkedIds:[],preAdvisedIds:[],theme:'light'};
+    applySnapshot(guest);
+  },
+  hasMeaningfulData(s) { return !!s && (s.checkedIds.length>0 || s.preAdvisedIds.length>0 || s.theme==='dark'); }
+};
 loadProgress();
+if(!IS_HOSTED) byId('cloudAccount').hidden=true;
 restoreRememberedHandle();
+</script>
+<script type="module">
+// Firebase Web SDK is loaded from Google's CDN when online. No build tools needed.
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
+
+const firebaseConfig = {
+  apiKey: 'AIzaSyAetYk62f9izgvQkjzP7KYCbwWSs_J6mNA',
+  authDomain: 'bscse-course-tracker.firebaseapp.com',
+  projectId: 'bscse-course-tracker',
+  storageBucket: 'bscse-course-tracker.firebasestorage.app',
+  messagingSenderId: '1005153261159',
+  appId: '1:1005153261159:web:3945758af0b0aea8f366c2'
+};
+const app=initializeApp(firebaseConfig);
+const auth=getAuth(app);
+const database=getFirestore(app);
+const b=window.BSCSEBridge;
+const $=id=>document.getElementById(id);
+const state={user:null,ready:false,busy:false,pending:false,timer:null,writing:false,revision:0};
+const status=(s)=>{$('cloudStatus').textContent=s;};
+const errMsg=(error)=> (error?.code||error?.message||String(error)).replace(/^Firebase: /,'');
+const progressKey=uid=>'bscse-course-tracker-progress-v1-user-'+uid;
+const migratedKey=uid=>'bscse-cloud-migrated-'+uid;
+const pause=()=>{clearTimeout(state.timer);state.timer=null;};
+function buttons(){
+  $('googleSignIn').hidden=!!state.user;
+  $('googleSignIn').disabled=false;
+  $('googleSignOut').hidden=!state.user;
+  $('cloudSyncNow').hidden=!state.user;
+}
+async function writeCloud(){
+  if(!state.user||!state.ready||state.busy||state.writing)return;
+  pause();
+  if(!navigator.onLine){state.pending=true;status('Offline · saved in this browser; cloud sync pending');return;}
+  const uid=state.user.uid,rev=state.revision, snapshot=b.getSnapshot();
+  state.writing=true;status('Saving to Google cloud…');
+  try {
+    await setDoc(doc(database,'users',uid),{
+      version:4,checkedIds:snapshot.checkedIds,preAdvisedIds:snapshot.preAdvisedIds,
+      theme:snapshot.theme,savedAt:snapshot.savedAt,updatedAt:serverTimestamp()
+    });
+    if(state.user?.uid!==uid)return;
+    state.pending=state.revision!==rev;
+    status(state.pending?'More changes pending…':'✓ Saved locally and to Google cloud');
+    if(state.pending) scheduleCloud();
+  }catch(error){
+    console.error('Cloud write failed',error);
+    state.pending=true;
+    status('⚠ Saved locally; cloud sync failed ('+errMsg(error)+'). Click Sync now to retry.');
+  }finally{state.writing=false;}
+}
+function scheduleCloud(){
+  if(!state.user||!state.ready)return;
+  pause();
+  state.timer=setTimeout(()=>writeCloud(),1100);
+}
+function changed(){
+  if(!state.user)return;
+  state.revision++;
+  state.pending=true;
+  if(state.busy){status('Sign-in synchronization in progress; changes kept locally');return;}
+  scheduleCloud();
+}
+window.BSCSECloud={changed,saveNow:async()=>{
+  if(!state.user){b.toast('Saved in this browser. Sign in to enable cloud sync.','info');return;}
+  state.pending=true; await writeCloud();
+}};
+
+// Never silently replace existing progress when two nonidentical versions exist.
+async function askWhichCopy(cloud,local){
+  return new Promise(resolve=>{
+    const dialog=$('cloudConflict');dialog.hidden=false;
+    $('chooseCloud').onclick=()=>{dialog.hidden=true;resolve('cloud');};
+    $('chooseLocal').onclick=()=>{dialog.hidden=true;resolve('local');};
+  });
+}
+async function connectAccount(user){
+  pause();state.ready=false;state.busy=true;state.pending=false;
+  state.user=user;buttons();
+  $('cloudHeading').textContent=user.displayName ? 'Signed in: '+user.displayName : 'Signed in with Google';
+  status('Checking your Google cloud progress…');
+  const userLocal=b.getUserSnapshot(user.uid);
+  const guest=b.getGuestSnapshot();
+  const guestUnmigrated=!localStorage.getItem(migratedKey(user.uid));
+  const local=userLocal || (guestUnmigrated && b.hasMeaningfulData(guest) ? guest : null);
+  // Switch storage only once we know which account owns the active state.
+  window.BSCSEActiveUID=user.uid;
+  try{
+    const record=await getDoc(doc(database,'users',user.uid));
+    if(state.user?.uid!==user.uid)return;
+    const cloud=record.exists()?b.normalize(record.data()):null;
+    if(cloud){
+      if(local && !b.sameSelection(local,cloud)){
+        status('Your browser and cloud have different progress — choose which to keep');
+        const choice=await askWhichCopy(cloud,local);
+        if(state.user?.uid!==user.uid)return;
+        b.applySnapshot(choice==='cloud'?cloud:local);
+        b.persistBrowserProgress();
+        if(choice==='local')state.pending=true;
+      }else{
+        b.applySnapshot(cloud);
+        b.persistBrowserProgress();
+      }
+    }else{
+      const first=local||{version:4,checkedIds:[],preAdvisedIds:[],theme:'light'};
+      b.applySnapshot(first);
+      b.persistBrowserProgress();
+      state.pending=true;
+    }
+    localStorage.setItem(migratedKey(user.uid),'1');
+    state.ready=true;state.busy=false;
+    status(state.pending?'Uploading your selected progress…':'✓ Synced with Google cloud');
+    if(state.pending) await writeCloud();
+    else b.toast('Google account connected · progress restored','success');
+  }catch(error){
+    console.error('Cloud initial load failed',error);
+    // No cloud data has been loaded: stay on this account's local data only.
+    b.applySnapshot(local||{version:4,checkedIds:[],preAdvisedIds:[],theme:'light'});
+    b.persistBrowserProgress();
+    state.ready=false;state.busy=false;state.pending=true;
+    status('⚠ Cloud could not be loaded ('+errMsg(error)+'). Local edits are safe. Click Sync now to retry loading.');
+  }
+}
+$('googleSignIn').addEventListener('click',async()=>{
+  const btn=$('googleSignIn');btn.disabled=true;
+  try{await signInWithPopup(auth,new GoogleAuthProvider());}
+  catch(error){status('Sign-in failed: '+errMsg(error));b.toast('Google sign-in failed: '+errMsg(error),'error');}
+  finally{btn.disabled=false;}
+});
+$('googleSignOut').addEventListener('click',async()=>{
+  if(state.pending && state.ready && navigator.onLine) await writeCloud();
+  if(state.pending) b.toast('Cloud sync is pending. Your selections are saved locally on this device.','info');
+  try{await signOut(auth);}catch(error){b.toast('Sign-out failed: '+errMsg(error),'error');}
+});
+$('cloudSyncNow').addEventListener('click',async()=>{
+  if(!state.user)return;
+  if(!state.ready){await connectAccount(state.user);return;}
+  state.pending=true; await writeCloud();
+});
+window.addEventListener('online',()=>{
+  if(!state.user)return;
+  if(!state.ready){connectAccount(state.user);return;}
+  if(state.pending)scheduleCloud();
+});
+onAuthStateChanged(auth,user=>{
+  if(user){connectAccount(user);}
+  else{
+    pause();state.user=null;state.ready=false;state.busy=false;state.pending=false;
+    b.switchToGuest();
+    $('cloudHeading').textContent='Google cloud backup';
+    status('Not signed in · automatic saving is active in this browser');
+    buttons();
+  }
+},error=>{status('Authentication unavailable: '+errMsg(error));buttons();});
 </script>
 </body>
 </html>
