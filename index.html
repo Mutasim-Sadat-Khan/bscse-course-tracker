@@ -478,6 +478,30 @@
       #courseTable .elective-picker{font-size:clamp(8px,1.7vw,11px);line-height:1.2;padding:5px 2px;margin-top:4px;max-width:100%}
       #courseTable .elective-picker-hint{font-size:clamp(8px,1.45vw,10px)}
     }
+    /* Completed/planned rows have a light green/yellow fill in both themes.
+       Keep inputs distinctly dark in dark mode, and their inline helper text
+       high contrast against the row background. No layout/behavior changes. */
+    [data-theme="dark"] #courseTable tbody tr.is-complete .elective-picker:not(:disabled),
+    [data-theme="dark"] #courseTable tbody tr.is-planned .elective-picker:not(:disabled),
+    [data-theme="dark"] #courseTable tbody tr.is-complete .open-elect-trigger,
+    [data-theme="dark"] #courseTable tbody tr.is-planned .open-elect-trigger{
+      color-scheme:dark;
+      background:#263a4a!important;
+      color:#eefbf4!important;
+      border-color:#547a68!important;
+    }
+    #courseTable tbody tr.is-complete .elective-picker-hint{
+      color:#1a583e!important;
+    }
+    #courseTable tbody tr.is-planned .elective-picker-hint{
+      color:#674719!important;
+    }
+    [data-theme="dark"] #courseTable tbody tr.is-complete .elective-picker-hint{
+      color:#145034!important;
+    }
+    [data-theme="dark"] #courseTable tbody tr.is-planned .elective-picker-hint{
+      color:#634312!important;
+    }
     @media print{.elective-picker,.elective-picker-hint{display:none!important}}
 
     @page { size: A4 portrait; margin: 8mm 9mm 9mm; }
@@ -595,12 +619,24 @@
       #planTable .plan-badge{font-size:clamp(8px,2vw,10px);padding:2px 3px}
       #planTable .circle-action{width:clamp(21px,5.6vw,28px);height:clamp(21px,5.6vw,28px)}
     }
+    /* Portrait phones: show the full desktop-style Install app pill in its own
+       right-aligned grid row. Never float it over the theme switch or title. */
     @media screen and (max-width:650px) and (orientation:portrait){
-      .topline{position:relative}
-      .topline .eyebrow{padding-right:68px}
-      .top-actions .install-app-btn{position:absolute;right:0;top:0;min-height:27px;padding:5px 8px;font-size:10px}
-      .top-actions .install-app-caption{display:none}
-      .top-actions .install-app-icon{font-size:17px}
+      .topline{position:static}
+      .topline .eyebrow{padding-right:0}
+      .top-actions .install-app-btn{
+        position:static;
+        grid-column:1 / -1;
+        justify-self:end;
+        width:auto;
+        margin-top:5px;
+        min-height:34px;
+        padding:7px 12px;
+        font-size:12px;
+        gap:7px;
+      }
+      .top-actions .install-app-caption{display:inline}
+      .top-actions .install-app-icon{font-size:18px}
     }
     @media print{.install-app-btn,.install-help{display:none!important}}
 </style>
@@ -1702,7 +1738,7 @@ function completedCatalogCodes(completed=checkedIds){
 }
 function openElectPickerMarkup(c){
   const offered=OPEN_ELECT_CATALOG_MAP.get(openElectSelections[c.id]);
-  const message=offered?'Change offered course…':'Search offered courses…';
+  const message=offered?prettyCatalogCode(offered.code)+' '+offered.title:'Search offered courses…';
   return `<button class="open-elect-trigger" type="button" data-id="${esc(c.id)}" aria-haspopup="dialog" aria-controls="openElectMenu" aria-expanded="false" title="Search and choose your Open Elect course">${esc(message)} <span aria-hidden="true">▾</span></button>`+
     `<small class="elective-picker-hint">${offered?esc(prettyCatalogCode(offered.code)+' selected'):'Search by code or course title'}</small>`;
 }
