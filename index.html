@@ -681,7 +681,7 @@
     <div class="cloud-actions">
       <button type="button" id="googleSignIn" class="cloud-signin" disabled>Sign in with Google</button>
       <button type="button" id="cloudSyncNow" hidden>↻ Sync now</button>
-      <button type="button" id="cloudCheckNow" hidden title="Check if your Google account has newer course progress from another device">↓ Check updates</button>
+      <button type="button" id="cloudCheckNow" hidden title="Manually refresh the live Google cloud connection">↓ Check updates</button>
       <button type="button" id="googleSignOut" hidden>Sign out</button>
     </div>
   </section>
@@ -1974,7 +1974,7 @@ restoreRememberedHandle();
 // Firebase Web SDK is loaded from Google's CDN when online. No build tools needed.
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
+import { getFirestore, doc, getDocFromServer, onSnapshot, runTransaction, serverTimestamp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
 
 const firebaseConfig = {
   apiKey: 'AIzaSyAetYk62f9izgvQkjzP7KYCbwWSs_J6mNA',
@@ -1989,24 +1989,49 @@ const auth=getAuth(app);
 const database=getFirestore(app);
 const b=window.BSCSEBridge;
 const $=id=>document.getElementById(id);
-const state={user:null,ready:false,busy:false,pending:false,timer:null,writing:false,revision:0,lastCloudSync:null};
-const stateTitles={checking:'Checking cloud…',syncing:'Syncing to cloud…',synced:'Cloud up to date',offline:'Offline · saved locally',local:'Browser-only saving',error:'Cloud sync needs attention',conflict:'Choose which progress to keep'};
+// Every signed-in browser listens to the same private users/{uid} document.
+// We merge *changes since the last cloud copy*, rather than replacing the entire
+// document with a potentially stale snapshot from this device.
+const state={
+  user:null,ready:false,busy:false,pending:false,timer:null,writing:false,
+  revision:0,lastCloudSync:null,base:null,unsubscribe:null,session:0,lastSeenSerial:0
+};
+const stateTitles={
+  checking:'Connecting live sync…',syncing:'Syncing to cloud…',
+  synced:'Live sync active',offline:'Offline · saved locally',
+  local:'Browser-only saving',error:'Cloud sync needs attention',
+  conflict:'Choose which progress to keep'
+};
 function status(message,mode='checking'){
   $('cloudStatus').textContent=message;
-  const indicator=$('syncIndicator');
-  indicator.dataset.state=mode;
+  $('syncIndicator').dataset.state=mode;
   $('syncLabel').textContent=stateTitles[mode]||stateTitles.checking;
-  const time=$('syncTime');
-  time.textContent=state.lastCloudSync && mode==='synced' ? '· '+state.lastCloudSync.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}) : '';
+  $('syncTime').textContent=state.lastCloudSync && mode==='synced'
+    ? '· '+state.lastCloudSync.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'}) : '';
 }
-function markCloudSaved(message='✓ Saved locally and to Google cloud'){
+function markCloudSaved(message='✓ Live sync active · saved to Google cloud'){
   state.lastCloudSync=new Date();
   status(message,'synced');
 }
-const errMsg=(error)=> (error?.code||error?.message||String(error)).replace(/^Firebase: /,'');
-const progressKey=uid=>'bscse-course-tracker-progress-v1-user-'+uid;
+const errMsg=error=>(error?.code||error?.message||String(error)).replace(/^Firebase: /,'');
 const migratedKey=uid=>'bscse-cloud-migrated-'+uid;
+const baselineKey=uid=>'bscse-live-cloud-base-'+uid;
+function storedBaseline(uid){
+  try{return b.normalize(JSON.parse(localStorage.getItem(baselineKey(uid))||'null'));}
+  catch(_){return null;}
+}
+function rememberBaseline(snapshot){
+  if(!state.user)return;
+  const normalized=b.normalize(snapshot);
+  if(!normalized)return;
+  state.base=normalized;
+  try{localStorage.setItem(baselineKey(state.user.uid),JSON.stringify(normalized));}
+  catch(error){console.warn('Could not store last synchronized baseline',error);}
+}
 const pause=()=>{clearTimeout(state.timer);state.timer=null;};
+function stopListener(){
+  if(state.unsubscribe){state.unsubscribe();state.unsubscribe=null;}
+}
 function buttons(){
   $('googleSignIn').hidden=!!state.user;
   $('googleSignIn').disabled=false;
@@ -2014,47 +2039,195 @@ function buttons(){
   $('cloudSyncNow').hidden=!state.user;
   $('cloudCheckNow').hidden=!state.user;
 }
-async function writeCloud(){
-  if(!state.user||!state.ready||state.busy||state.writing)return;
-  pause();
-  if(!navigator.onLine){state.pending=true;status('Offline · saved in this browser; cloud sync pending','offline');return;}
-  const uid=state.user.uid,rev=state.revision, snapshot=b.getSnapshot();
-  state.writing=true;status('Saving to Google cloud…','syncing');
-  try {
-    await setDoc(doc(database,'users',uid),{
-      version:5,activeDepartment:snapshot.activeDepartment,departments:snapshot.departments,
-      checkedIds:snapshot.checkedIds,preAdvisedIds:snapshot.preAdvisedIds,
-      theme:snapshot.theme,savedAt:snapshot.savedAt,updatedAt:serverTimestamp()
-    });
-    if(state.user?.uid!==uid)return;
-    state.pending=state.revision!==rev;
-    if(state.pending)status('More changes pending…','syncing');
-    else markCloudSaved();
-    if(state.pending) scheduleCloud();
-  }catch(error){
-    console.error('Cloud write failed',error);
-    state.pending=true;
-    status('⚠ Saved locally; cloud sync failed ('+errMsg(error)+'). Click Sync now to retry.','error');
-  }finally{state.writing=false;}
+function blankProgress(){
+  return b.normalize({version:5,activeDepartment:'CSE',theme:'light',departments:{
+    CSE:{checkedIds:[],preAdvisedIds:[],electiveSelections:{},openElectSelections:{}},
+    EEE:{checkedIds:[],preAdvisedIds:[],electiveSelections:{},openElectSelections:{}}
+  }});
+}
+// Merge only changes that the current device actually made. This means device
+// A can tick ENG102 while B pre-advises MAT361 without either action erasing
+// the other, even when their writes start at virtually the same time.
+function mergeChanges(baseline,local,remote){
+  const before=b.normalize(baseline)||blankProgress();
+  const mine=b.normalize(local)||blankProgress();
+  const theirs=b.normalize(remote)||blankProgress();
+  const combined={
+    version:5,
+    activeDepartment:mine.activeDepartment!==before.activeDepartment?mine.activeDepartment:theirs.activeDepartment,
+    theme:mine.theme!==before.theme?mine.theme:theirs.theme,
+    savedAt:new Date().toISOString(),
+    departments:{}
+  };
+  for(const department of ['CSE','EEE']){
+    const original=before.departments[department];
+    const edited=mine.departments[department];
+    const newest=theirs.departments[department];
+    const mergeIds=(field)=>{
+      const initial=new Set(original[field]);
+      const desired=new Set(edited[field]);
+      const output=new Set(newest[field]);
+      for(const id of initial)if(!desired.has(id))output.delete(id);
+      for(const id of desired)if(!initial.has(id))output.add(id);
+      return field==='checkedIds'?[...output].sort():[...output];
+    };
+    const mergeChoices=(field)=>{
+      const output={...newest[field]};
+      for(const id of new Set([...Object.keys(original[field]),...Object.keys(edited[field])])){
+        const oldValue=original[field][id]||'';
+        const newValue=edited[field][id]||'';
+        if(newValue===oldValue)continue;
+        if(newValue)output[id]=newValue;
+        else delete output[id];
+      }
+      return output;
+    };
+    combined.departments[department]={
+      checkedIds:mergeIds('checkedIds'),
+      preAdvisedIds:mergeIds('preAdvisedIds'),
+      electiveSelections:mergeChoices('electiveSelections'),
+      openElectSelections:mergeChoices('openElectSelections')
+    };
+  }
+  return b.normalize(combined)||blankProgress();
+}
+function applyReceived(progress){
+  if(!b.sameSelection(b.getSnapshot(),progress))b.applySnapshot(progress);
+  // Applying a remote update is NOT a local edit. Don't call changed() here.
+  b.persistBrowserProgress();
 }
 function scheduleCloud(){
-  if(!state.user||!state.ready)return;
+  if(!state.user||!state.ready||!state.pending||state.writing)return;
   pause();
-  state.timer=setTimeout(()=>writeCloud(),1100);
+  // A short coalescing window avoids a write for each rapid checkbox tap.
+  state.timer=setTimeout(()=>writeCloud(),180);
 }
 function changed(){
   if(!state.user)return;
   state.revision++;
   state.pending=true;
-  if(state.busy){status('Sign-in synchronization in progress; changes kept locally','syncing');return;}
-  scheduleCloud();
+  if(!state.ready||state.busy){
+    status('Saving locally · cloud connection is initializing…','syncing');
+    return;
+  }
+  if(!navigator.onLine){status('Offline · your edits will sync after reconnection','offline');return;}
+  if(!state.writing)scheduleCloud();
+}
+// A transaction retries on concurrent updates, reading the newest server copy
+// before applying only the delta from this device. Unlike plain setDoc(), it
+// avoids clobbering an unrelated edit made by another signed-in device.
+async function writeCloud(){
+  if(!state.user||!state.ready||state.busy||state.writing||!state.pending)return;
+  pause();
+  if(!navigator.onLine){status('Offline · saved locally; will sync when online','offline');return;}
+  const uid=state.user.uid, session=state.session;
+  const before=state.base||blankProgress();
+  const draft=b.getSnapshot();
+  state.writing=true;
+  status('Saving changes to Google · other devices update automatically…','syncing');
+  let result=null,serial=0,committed=false;
+  try{
+    const ref=doc(database,'users',uid);
+    await runTransaction(database,async transaction=>{
+      const record=await transaction.get(ref);
+      const existing=record.exists()?b.normalize(record.data()):blankProgress();
+      result=mergeChanges(before,draft,existing);
+      serial=(Number(record.exists()?record.data().syncSerial:0)||0)+1;
+      transaction.set(ref,{
+        version:5,activeDepartment:result.activeDepartment,
+        departments:result.departments,checkedIds:result.checkedIds,
+        preAdvisedIds:result.preAdvisedIds,theme:result.theme,
+        savedAt:result.savedAt,updatedAt:serverTimestamp(),syncSerial:serial
+      });
+    });
+    committed=true;
+    if(state.session!==session||state.user?.uid!==uid)return;
+    // Edits made DURING the transaction must still be included in the next write.
+    // The listener may also have merged an incoming edit while we were writing.
+    const present=b.getSnapshot();
+    const combined=mergeChanges(draft,present,result);
+    rememberBaseline(result);
+    state.lastSeenSerial=Math.max(state.lastSeenSerial,serial);
+    applyReceived(combined);
+    state.pending=!b.sameSelection(combined,result);
+    if(state.pending)status('Another edit is waiting to sync…','syncing');
+    else markCloudSaved();
+  }catch(error){
+    if(state.session!==session)return;
+    console.error('Live cloud write failed',error);
+    state.pending=true;
+    status('⚠ Changes saved locally; cloud sync failed ('+errMsg(error)+'). Retry with Sync now.','error');
+  }finally{
+    state.writing=false;
+    if(state.pending&&state.ready&&navigator.onLine&&state.session===session&&state.user?.uid===uid){
+      // Don't hammer the server when an error is persistent; manual retry or
+      // a subsequent user edit/reconnect can resume synchronization.
+      if(committed)scheduleCloud();
+    }
+  }
+}
+// Firestore invokes this for changes committed by this device and by every
+// other connected device. Ignore cache-only/pending-write events, which can
+// represent older data or optimistic local transactions.
+function receiveRemote(record){
+  if(!state.user||!state.ready||record.metadata?.fromCache||record.metadata?.hasPendingWrites)return;
+  const raw=record.exists()?record.data():null;
+  if(!raw)return;
+  const remote=b.normalize(raw);
+  if(!remote)return;
+  const serial=Number(raw.syncSerial)||0;
+  if(serial<state.lastSeenSerial)return;
+  state.lastSeenSerial=serial;
+  const oldBase=state.base||remote;
+  if(state.pending||state.writing){
+    const combined=mergeChanges(oldBase,b.getSnapshot(),remote);
+    rememberBaseline(remote);
+    applyReceived(combined);
+    // While a transaction is running, let it complete before starting a new
+    // write. The subsequent merge preserves new local actions.
+    if(!state.writing){
+      state.pending=!b.sameSelection(combined,remote);
+      if(state.pending){
+        status('Received another device’s edits · syncing this device’s edits…','syncing');
+        scheduleCloud();
+      }else{pause();markCloudSaved('✓ Live cloud sync active · all devices match');}
+    }
+    return;
+  }
+  rememberBaseline(remote);
+  if(!b.sameSelection(b.getSnapshot(),remote)){
+    applyReceived(remote);
+    markCloudSaved('✓ Updated automatically from another device');
+    b.toast('Progress updated from another device','info');
+  }else{
+    markCloudSaved('✓ Live cloud sync active · all devices match');
+  }
+}
+function startListener(){
+  stopListener();
+  if(!state.user||!state.ready)return;
+  const uid=state.user.uid,session=state.session;
+  state.unsubscribe=onSnapshot(doc(database,'users',uid),{includeMetadataChanges:true},record=>{
+    if(state.session!==session||state.user?.uid!==uid)return;
+    receiveRemote(record);
+  },error=>{
+    if(state.session!==session)return;
+    console.error('Live Firestore listener failed',error);
+    status('⚠ Live connection failed ('+errMsg(error)+'). Use Check updates to reconnect.','error');
+    stopListener();
+  });
 }
 window.BSCSECloud={changed,saveNow:async()=>{
-  if(!state.user){b.toast('Saved in this browser. Sign in to enable cloud sync.','info');return;}
-  state.pending=true; await writeCloud();
+  if(!state.user){b.toast('Saved in this browser. Sign in for live sync.','info');return;}
+  if(!state.ready){await connectAccount(state.user);return;}
+  if(!state.pending){
+    if(!state.unsubscribe){await checkCloudUpdates();return;}
+    markCloudSaved('✓ Live sync already up to date');return;
+  }
+  await writeCloud();
 }};
-
-// Never silently replace existing progress when two nonidentical versions exist.
+// Ask only at first sign-in if this browser already has a different saved
+// copy. After sign-in, onSnapshot keeps copies in sync automatically.
 async function askWhichCopy(cloud,local){
   return new Promise(resolve=>{
     const dialog=$('cloudConflict');dialog.hidden=false;
@@ -2063,99 +2236,77 @@ async function askWhichCopy(cloud,local){
   });
 }
 async function connectAccount(user){
-  pause();state.ready=false;state.busy=true;state.pending=false;state.lastCloudSync=null;
+  pause();stopListener();
+  const session=++state.session;
+  state.ready=false;state.busy=true;state.pending=false;
+  state.base=null;state.lastCloudSync=null;state.lastSeenSerial=0;
   state.user=user;buttons();
-  $('cloudHeading').textContent=user.displayName ? 'Signed in: '+user.displayName : 'Signed in with Google';
-  status('Checking your Google cloud progress…','checking');
-  const userLocal=b.getUserSnapshot(user.uid);
+  $('cloudHeading').textContent=user.displayName?'Signed in: '+user.displayName:'Signed in with Google';
+  status('Connecting real-time Google cloud sync…','checking');
+  const localFromAccount=b.getUserSnapshot(user.uid);
   const guest=b.getGuestSnapshot();
   const guestUnmigrated=!localStorage.getItem(migratedKey(user.uid));
-  const local=userLocal || (guestUnmigrated && b.hasMeaningfulData(guest) ? guest : null);
-  // Switch storage only once we know which account owns the active state.
+  const local=localFromAccount||(guestUnmigrated&&b.hasMeaningfulData(guest)?guest:null);
+  const previousCloudBase=storedBaseline(user.uid);
   window.BSCSEActiveUID=user.uid;
   try{
-    const record=await getDoc(doc(database,'users',user.uid));
-    if(state.user?.uid!==user.uid)return;
+    const ref=doc(database,'users',user.uid);
+    const record=await getDocFromServer(ref);
+    if(state.session!==session||state.user?.uid!==user.uid)return;
     const cloud=record.exists()?b.normalize(record.data()):null;
+    state.base=cloud||blankProgress();
+    state.lastSeenSerial=Number(record.exists()?record.data().syncSerial:0)||0;
     if(cloud){
-      if(local && !b.sameSelection(local,cloud)){
-        status('Your browser and cloud have different progress — choose which to keep','conflict');
-        const choice=await askWhichCopy(cloud,local);
-        if(state.user?.uid!==user.uid)return;
-        b.applySnapshot(choice==='cloud'?cloud:local);
-        b.persistBrowserProgress();
-        if(choice==='local')state.pending=true;
-      }else{
-        b.applySnapshot(cloud);
-        b.persistBrowserProgress();
-      }
+      if(local&&!b.sameSelection(local,cloud)){
+        if(previousCloudBase){
+          // This browser already knows which cloud state it last synchronized.
+          // Automatically retain any offline edits while adopting newer
+          // progress from another device; no confusing popup on every reopen.
+          const combined=mergeChanges(previousCloudBase,local,cloud);
+          applyReceived(combined);
+          state.pending=!b.sameSelection(combined,cloud);
+        }else{
+          // Legacy installs lack a baseline. Ask once rather than guessing
+          // whether this browser has edits that were never uploaded.
+          status('This browser and cloud have different saved progress — choose which to keep','conflict');
+          const choice=await askWhichCopy(cloud,local);
+          if(state.session!==session||state.user?.uid!==user.uid)return;
+          applyReceived(choice==='cloud'?cloud:local);
+          if(choice==='local')state.pending=true;
+        }
+      }else applyReceived(cloud);
     }else{
-      const first=local||{version:5,checkedIds:[],preAdvisedIds:[],theme:'light'};
-      b.applySnapshot(first);
-      b.persistBrowserProgress();
+      applyReceived(local||blankProgress());
       state.pending=true;
     }
+    rememberBaseline(cloud||blankProgress());
     localStorage.setItem(migratedKey(user.uid),'1');
     state.ready=true;state.busy=false;
-    if(state.pending)status('Uploading your selected progress…','syncing');
-    else markCloudSaved('✓ Synced with Google cloud');
-    if(state.pending) await writeCloud();
-    else b.toast('Google account connected · progress restored','success');
+    startListener();
+    if(state.pending){status('Uploading this browser’s saved progress…','syncing');scheduleCloud();}
+    else markCloudSaved('✓ Live sync connected · watching for changes');
   }catch(error){
-    console.error('Cloud initial load failed',error);
-    // No cloud data has been loaded: stay on this account's local data only.
-    b.applySnapshot(local||{version:5,checkedIds:[],preAdvisedIds:[],theme:'light'});
-    b.persistBrowserProgress();
+    if(state.session!==session)return;
+    console.error('Initial live sync failed',error);
+    applyReceived(local||blankProgress());
     state.ready=false;state.busy=false;state.pending=true;
-    status('⚠ Cloud could not be loaded ('+errMsg(error)+'). Local edits are safe. Click Sync now to retry loading.','error');
+    status('⚠ Cloud connection failed ('+errMsg(error)+'). Local edits are safe. Use Sync now to retry.','error');
   }
 }
-// Safe manual pull from Firestore: do not overwrite un-synced local selections.
 async function checkCloudUpdates(){
   if(!state.user)return;
-  if(!navigator.onLine){status('Offline · cannot check other devices yet','offline');return;}
+  if(!navigator.onLine){status('Offline · cannot check Google cloud now','offline');return;}
   if(!state.ready){await connectAccount(state.user);return;}
-  pause();
-  const uid=state.user.uid;
-  const unsynced=state.pending;
-  state.busy=true;
-  status('Checking your other devices for updates…','checking');
+  const session=state.session;
+  status('Checking the latest cloud copy…','checking');
   try{
-    const record=await getDoc(doc(database,'users',uid));
-    if(state.user?.uid!==uid)return;
-    const cloud=record.exists()?b.normalize(record.data()):null;
-    const local=b.getSnapshot();
-    if(!cloud){
-      state.busy=false;
-      if(unsynced){state.pending=true;await writeCloud();}
-      else status('No Google cloud copy found yet. Your browser progress is preserved.','local');
-      return;
-    }
-    if(b.sameSelection(cloud,local)){
-      state.busy=false;
-      if(unsynced){state.pending=true;await writeCloud();}
-      else markCloudSaved('✓ Your browser and Google cloud match');
-      return;
-    }
-    status('Your Google cloud and this device have different progress — choose which to keep','conflict');
-    const choice=await askWhichCopy(cloud,local);
-    if(state.user?.uid!==uid)return;
-    if(choice==='cloud'){
-      b.applySnapshot(cloud);
-      b.persistBrowserProgress();
-      state.pending=false;
-      markCloudSaved('✓ Latest Google cloud progress loaded on this device');
-    }else{
-      b.persistBrowserProgress();
-      state.pending=true;
-      status('Keeping this device’s progress; saving to Google cloud…','syncing');
-    }
-    state.busy=false;
-    if(state.pending)await writeCloud();
+    const record=await getDocFromServer(doc(database,'users',state.user.uid));
+    if(session!==state.session)return;
+    receiveRemote(record);
+    if(!state.unsubscribe)startListener();
+    if(state.pending&&!state.writing)scheduleCloud();
   }catch(error){
-    state.busy=false;
-    state.pending=state.pending||unsynced;
-    status('⚠ Could not check cloud changes ('+errMsg(error)+')','error');
+    status('⚠ Could not check cloud progress ('+errMsg(error)+')','error');
   }
 }
 $('cloudCheckNow').addEventListener('click',checkCloudUpdates);
@@ -2182,13 +2333,16 @@ window.addEventListener('offline',()=>{
 window.addEventListener('online',()=>{
   if(!state.user)return;
   if(!state.ready){connectAccount(state.user);return;}
+  if(!state.unsubscribe)startListener();
   if(state.pending)scheduleCloud();
-  else status('Online again · click Check updates to look for changes from another device','checking');
+  else status('Reconnected · listening for live updates','checking');
 });
 onAuthStateChanged(auth,user=>{
   if(user){connectAccount(user);}
   else{
-    pause();state.user=null;state.ready=false;state.busy=false;state.pending=false;state.lastCloudSync=null;
+    ++state.session;pause();stopListener();
+    state.user=null;state.ready=false;state.busy=false;state.pending=false;
+    state.writing=false;state.base=null;state.lastSeenSerial=0;state.lastCloudSync=null;
     b.switchToGuest();
     $('cloudHeading').textContent='Google cloud backup';
     status('Not signed in · automatic saving is active in this browser','local');
