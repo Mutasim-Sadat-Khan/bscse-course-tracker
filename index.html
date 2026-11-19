@@ -706,21 +706,22 @@
   <div class="meter" role="progressbar" aria-label="Credit completion" aria-valuemin="0" aria-valuemax="130" aria-valuenow="0" id="progressTrack"><div id="progressFill"></div></div>
   <div class="meter-caption"><span>Credit progress · 130-credit curriculum</span><span id="progressSummary">0 of 130 credits</span></div>
 
-  <section class="toolbar" aria-label="Saving and PDF export">
+  <section class="toolbar" aria-label="Saving and export options">
     <div class="toolbar-actions">
       <button class="primary" id="connectBtn" type="button">🔗 Enable auto-save</button>
       <button id="changeFileBtn" type="button" hidden>📁 Choose another file</button>
-      <button id="saveBtn" type="button">💾 Save now</button>
+      <button id="saveBtn" type="button" hidden aria-hidden="true" tabindex="-1">💾 Save now</button>
+      <button id="exportJpegBtn" type="button" title="Download a long JPEG image containing your progress, course table and pre-advising plan">🖼️ Export as JPEG</button>
       <!-- Optional backup action: remove hidden to show the button again. Script retained below. -->
       <button id="downloadBtn" type="button" hidden title="Download an independent backup containing your current checkmarks and calculated credits">⬇ Download backup</button>
-      <button id="exportPdfBtn" type="button" title="Export this entire tracker with its current progress, checked courses, course colors, and pre-advising plan as a PDF">📄 Export as PDF</button>
+      <button id="exportPdfBtn" type="button" title="Download a print-friendly A4 PDF containing your progress, course table and pre-advising plan">📄 Export as PDF</button>
       <!-- Optional progress import: remove hidden to show the button again. Script retained below. -->
       <button id="importBtn" type="button" hidden title="Restore completed courses from a previous BSCSE HTML tracker">↥ Import previous progress</button>
       <input type="file" id="importInput" accept=".html,.htm,text/html" hidden>
     </div>
     <span id="saveState" class="save-state" aria-live="polite">Loading saved progress…</span>
   </section>
-  <p class="save-guide" id="saveGuide"><strong>Auto-save:</strong> Changes save automatically. Enable file access when using the offline version.</p>
+  <p class="save-guide" id="saveGuide"><strong>Auto-save:</strong> Changes save automatically. Enable file access when using the offline version. You can export a shareable JPEG or a print-friendly PDF any time.</p>
 
   <div class="table-shell" role="region" aria-label="Semester-wise course list" tabindex="0">
     <table id="courseTable">
@@ -751,7 +752,7 @@
     <div class="empty-plan" id="emptyPlan">No pre-advised courses yet. Add one using a green + icon above.</div>
     <p class="planner-note">Maximum 14 credits, including retakes. Prerequisites are checked automatically; each department's plan saves separately. For CSE, choose an elective course before adding ELECT1–3.</p>
   </section>
-  <p class="help" id="helpLocal">Offline progress saves into this HTML file after you grant file access. Use <strong>Save now</strong> if needed; PDF export remains available.</p>
+  <p class="help" id="helpLocal">Offline progress saves into this HTML file after you grant file access. JPEG and PDF export remain available any time.</p>
   <p class="help" id="helpHosted" hidden>Progress saves in this browser. <strong>Sign in with Google to sync across devices.</strong></p>
 <p class="footnote" id="curriculumFootnote">ECE Curriculum – Approved by UGC, March 2015 – Effective from Spring 2018</p>
 </main>
@@ -1937,11 +1938,575 @@ byId('connectBtn').addEventListener('click',enableAutoSave);
 byId('changeFileBtn').addEventListener('click',chooseFile);
 byId('saveBtn').addEventListener('click',saveNow);
 byId('downloadBtn').addEventListener('click',downloadSavedHtml);
+/* Standalone, dependency-free PDF exporter. Uses PDF vector drawing and selectable
+   standard-font text. No print dialog or network/library downloads are required. */
+function exportProgressPdf() {
+  const W=595.28, H=841.89, M=37.5, CW=W-2*M, BOTTOM=782;
+  const C={
+    navy:'#223B53', ink:'#26364A', muted:'#718093', burgundy:'#AC3448',
+    pale:'#F1F5F8', line:'#D6DEE5', white:'#FFFFFF', lightGreen:'#E4F3E9',
+    green:'#18724C', lightAmber:'#FFF1D4', amber:'#9E641D', lighter:'#F9FBFC'
+  };
+  const departments={CSE:'Computer Science & Engineering',EEE:'Electrical & Electronic Engineering'};
+  const date=new Date();
+  const generated=date.toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const dateSlug=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
+  const pdfString=s=>String(s??'').normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g,'').replace(/[\u2010-\u2015\u2212]/g,'-')
+    .replace(/[\u2018\u2019]/g,"'").replace(/[\u201C\u201D]/g,'"')
+    .replace(/\u2026/g,'...').replace(/\u2022/g,'-').replace(/[\r\n\t]+/g,' ')
+    .replace(/\s+/g,' ').replace(/[^\x20-\x7E]/g,'?').trim();
+  const escapePdf=s=>pdfString(s).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
+  const canvas=document.createElement('canvas');
+  const measureContext=canvas.getContext('2d');
+  function tw(value,size,bold=false){
+    measureContext.font=(bold?'700 ':'400 ')+size+'px Arial, sans-serif';
+    return measureContext.measureText(pdfString(value)).width*1.035;
+  }
+  function splitLines(value,available,size,bold=false){
+    const words=pdfString(value).split(' ');
+    const lines=[];let line='';
+    for(const originalWord of words){
+      if(!originalWord)continue;
+      let word=originalWord;
+      while(tw(word,size,bold)>available && word.length>1){
+        let head='';
+        for(const c of word){if(head && tw(head+c,size,bold)>available)break;head+=c;}
+        if(line){lines.push(line);line='';}
+        lines.push(head);word=word.substring(head.length);
+      }
+      if(!word)continue;
+      if(!line){line=word;continue;}
+      const candidate=line+' '+word;
+      if(tw(candidate,size,bold)<=available)line=candidate;
+      else {lines.push(line);line=word;}
+    }
+    if(line)lines.push(line);
+    return lines.length?lines:[''];
+  }
+  const pages=[];let commands=null;let Y=0;
+  const col=v=>{
+    const h=(C[v]||v).replace('#','');
+    return [0,2,4].map(i=>(parseInt(h.slice(i,i+2),16)/255).toFixed(4)).join(' ');
+  };
+  const num=x=>Number(x).toFixed(2).replace(/\.00$/,'');
+  function cmd(s){commands.push(s);}
+  function rect(x,y,w,h,color){cmd(`${col(color)} rg ${num(x)} ${num(H-y-h)} ${num(w)} ${num(h)} re f`);}
+  function stroke(x1,y1,x2,y2,color,width=0.7){cmd(`${col(color)} RG ${num(width)} w ${num(x1)} ${num(H-y1)} m ${num(x2)} ${num(H-y2)} l S`);}
+  function circle(x,y,r,fillColor=null,strokeColor=null,width=0.7){
+    const k=0.5522847498*r;
+    const fill=fillColor?col(fillColor):null;
+    const strokeCol=strokeColor?col(strokeColor):null;
+    const parts=[];
+    if(fill)parts.push(`${fill} rg`);
+    if(strokeCol)parts.push(`${strokeCol} RG ${num(width)} w`);
+    parts.push(
+      `${num(x+r)} ${num(H-y)} m`,
+      `${num(x+r)} ${num(H-(y-k))} ${num(x+k)} ${num(H-(y-r))} ${num(x)} ${num(H-(y-r))} c`,
+      `${num(x-k)} ${num(H-(y-r))} ${num(x-r)} ${num(H-(y-k))} ${num(x-r)} ${num(H-y)} c`,
+      `${num(x-r)} ${num(H-(y+k))} ${num(x-k)} ${num(H-(y+r))} ${num(x)} ${num(H-(y+r))} c`,
+      `${num(x+k)} ${num(H-(y+r))} ${num(x+r)} ${num(H-(y+k))} ${num(x+r)} ${num(H-y)} c`
+    );
+    parts.push(fill&&strokeCol?'B':fill?'f':'S');
+    cmd(parts.join(' '));
+  }
+  function label(value,x,baseline,size=9,color='ink',bold=false,align='left'){
+    const s=pdfString(value); if(!s)return;
+    if(align==='center')x-=tw(s,size,bold)/2;
+    if(align==='right')x-=tw(s,size,bold);
+    cmd(`${col(color)} rg BT /F${bold?2:1} ${num(size)} Tf 1 0 0 1 ${num(x)} ${num(H-baseline)} Tm (${escapePdf(s)}) Tj ET`);
+  }
+  function wrapped(value,x,baseline,width,size=8.6,leading=10.7,color='ink',bold=false){
+    const ls=splitLines(value,width,size,bold);
+    ls.forEach((s,i)=>label(s,x,baseline+i*leading,size,color,bold));
+    return ls.length;
+  }
+  function newPage(kind='progress'){
+    commands=[];pages.push(commands);
+    label('NORTH SOUTH UNIVERSITY  /  ECE CURRICULUM',M,34,8,C.muted,true);
+    label(`${activeDepartment}  /  ${kind==='progress'?'COURSE PROGRESS':'PRE-ADVISING'}`,W-M,34,8,C.burgundy,true,'right');
+    rect(M,47,CW,3.3,C.burgundy);
+    if(kind==='progress'){
+      label('Course Progress Report',M,72,20,C.navy,true);
+      label(`${activeDepartment} - ${departments[activeDepartment]}`,M,88,9.2,C.muted);
+      label(`Generated ${generated}`,W-M,98,7.5,C.muted,false,'right');
+      const done=totals();const progress=done.credits/130*100;
+      const metrics=[
+        ['COMPLETED CREDITS',n(done.credits)],['REMAINING CREDITS',n(Math.max(0,130-done.credits))],
+        ['COURSES FINISHED',`${done.finished} / ${COURSES.length}`],['DEGREE COMPLETED',`${(Math.round(progress*10)/10).toFixed(1)}%`]
+      ];
+      const gap=7,boxW=(CW-gap*3)/4;
+      metrics.forEach(([heading,v],i)=>{
+        const x=M+i*(boxW+gap);
+        rect(x,106,boxW,34,i===0?C.navy:C.pale);
+        label(heading,x+8,118.5,6.3,i===0?C.white:C.muted,true);
+        label(v,x+8,134,13.8,i===0?C.white:C.navy,true);
+      });
+      rect(M,146,CW,3.5,C.line);
+      rect(M,146,CW*Math.max(0,Math.min(1,done.credits/130)),3.5,C.green);
+      label(`${n(done.credits)} of 130 credits completed`,M,160,7.2,C.muted);
+      rect(W-M-154,154,6,6,C.lightGreen);label('Completed',W-M-144,160,6.8,C.muted);
+      rect(W-M-77,154,6,6,C.lightAmber);label('Pre-advised',W-M-67,160,6.8,C.muted);
+      Y=183;
+    }else{
+      label('Pre-Advising Plan',M,72,20,C.navy,true);
+      label(`${activeDepartment} - ${departments[activeDepartment]}`,M,88,9.2,C.muted);
+      label(`Generated ${generated}`,W-M,98,7.5,C.muted,false,'right');
+      const picked=preAdvisedIds.map(id=>courseById.get(id)).filter(Boolean);
+      const total=plannedCreditTotal();
+      const metrics=[
+        ['PLANNED CREDITS',`${n(total)} / 14`],
+        ['CREDITS AVAILABLE',n(Math.max(0,14-total))],
+        ['PLANNED COURSES',String(picked.length)]
+      ];
+      const gap=8,boxW=(CW-gap*2)/3;
+      metrics.forEach(([heading,value],i)=>{
+        const x=M+i*(boxW+gap);
+        rect(x,106,boxW,40,i===0?C.navy:C.pale);
+        label(heading,x+10,119,6.7,i===0?C.white:C.muted,true);
+        label(value,x+10,137,15.5,i===0?C.white:C.navy,true);
+      });
+      Y=172;
+    }
+  }
+  function sectionTitle(text){
+    if(Y+42>BOTTOM){newPage();}
+    rect(M,Y-15,3,18,C.burgundy);
+    label(text,M+12,Y,12.6,C.navy,true);
+    Y+=15;
+  }
+  function tableHeader(labels,widths,height=28,font=7.6){
+    rect(M,Y,CW,height,C.navy);
+    let x=M;
+    labels.forEach((name,i)=>{
+      const center=i!==1;
+      const lines=splitLines(name,widths[i]-8,font,true);
+      const lineHeight=font+1.5;
+      const startBaseline=Y+(height-(lines.length-1)*lineHeight)/2+font*.34;
+      lines.forEach((line,j)=>label(line,center?x+widths[i]/2:x+8,startBaseline+j*lineHeight,font,C.white,true,center?'center':'left'));
+      x+=widths[i];
+    });
+    Y+=height;
+  }
+  function drawCellText(lines,x,w,top,rowH,size,color='ink',bold=false,left=false,leading=10.3){
+    const totalH=(lines.length-1)*leading+size;
+    const first=top+(rowH-totalH)/2+size;
+    lines.forEach((t,i)=>label(t,left?x+6:x+w/2,first+i*leading,size,color,bold,left?'left':'center'));
+  }
+  function drawCheckbox(x,y,checked){
+    // Small vector circles retain a clear gap even in tightly fitted rows.
+    const r=3.1;
+    circle(x,y,r,checked?C.green:C.white,checked?C.green:C.muted,.65);
+    if(checked){
+      stroke(x-1.9,y,x-0.5,y+1.5,C.white,.92);
+      stroke(x-0.5,y+1.5,x+2.1,y-1.55,C.white,.92);
+    }
+  }
+  const courseWidths=[35,251,30,44,45,115.28];
+  const courseHeads=['SEM.','COURSE','CR.','DONE','CR/SEM.','PREREQUISITES'];
+  function courseHeader(){tableHeader(courseHeads,courseWidths,23,6.8);}
+  // Fit ALL course rows on page 1. Calculate the line wrapping first, then
+  // choose the largest legible font that fits between the header and footer.
+  // This also accounts for long Elect 1/2/3 and Open Elect course titles.
+  function measureCourseLayout(size){
+    const lead=size+1.45,prSize=Math.max(5.8,size-.55),prLead=prSize+1.15;
+    const rows=COURSES.map(c=>{
+      const nameLines=splitLines(displayCourseName(c),courseWidths[1]-12,size);
+      const reqLines=splitLines(c.prerequisite,courseWidths[5]-10,prSize);
+      const h=Math.max(10.25,2.4+Math.max(nameLines.length*lead,reqLines.length*prLead));
+      return {nameLines,reqLines,h};
+    });
+    return {size,lead,prSize,prLead,rows,total:rows.reduce((sum,r)=>sum+r.h,0)};
+  }
+  // Progress section starts at 183 (with breathing room under the caption),
+  // section title consumes 15, header consumes 23,
+  // and the last 22pt are reserved for the total credits row.
+  const availableCourseHeight=BOTTOM-(183+15+23+22)-3;
+  let compact=null;
+  for(const size of [8.6,8.4,8.2,8,7.8,7.6,7.4,7.2,7,6.8,6.6,6.4,6.2,6]){
+    const candidate=measureCourseLayout(size);
+    compact=candidate;
+    if(candidate.total<=availableCourseHeight)break;
+  }
+  // Distribute unused vertical space between rows rather than leaving a big
+  // unused area at the bottom; never clip the table to force a page count.
+  const extraRowSpace=Math.max(0,Math.min(2,(availableCourseHeight-compact.total)/COURSES.length));
+  function drawCourse(c,index){
+    const layout=compact.rows[index];
+    const rowH=layout.h+extraRowSpace,top=Y;
+    const done=checkedIds.has(c.id),planned=preAdvisedIds.includes(c.id);
+    rect(M,top,CW,rowH,planned?C.lightAmber:done?C.lightGreen:index%2?C.lighter:C.white);
+    if(c.startOfSemester)stroke(M,top,M+CW,top,C.navy,1.0);
+    const name=displayCourseName(c);
+    let x=M;
+    const vals=[c.startOfSemester?c.semLabel:'',name,n(c.credits),null,c.startOfSemester?n(c.semesterCredits):'',c.prerequisite];
+    vals.forEach((v,i)=>{
+      if(i===3){drawCheckbox(x+courseWidths[i]/2,top+rowH/2,done);}
+      else if(v){
+        const textSize=i===1?compact.size:i===5?compact.prSize:7.2;
+        const leading=i===1?compact.lead:i===5?compact.prLead:8.5;
+        const lines=i===1?layout.nameLines:i===5?layout.reqLines:splitLines(v,courseWidths[i]-6,textSize,i===0);
+        let color=C.ink;
+        if(i===1){
+          const map={'#009C42':'#16663D','#7135A2':'#774AAB','#F02020':'#A92F3C','#DB7000':'#A75B25','#8F2929':'#803943'};
+          color=map[(c.courseColor||'').toUpperCase()]||C.ink;
+          if(planned)color=C.ink;
+        }
+        if(i===5)color=C.muted;
+        drawCellText(lines,x,courseWidths[i],top,rowH,textSize,color,i===0||i===4,i===1||i===5,leading);
+      }
+      x+=courseWidths[i];
+    });
+    let cx=M;
+    courseWidths.slice(0,-1).forEach(w=>{cx+=w;stroke(cx,top,cx,top+rowH,C.line,.35);});
+    stroke(M,top+rowH,M+CW,top+rowH,C.line,.38);
+    Y+=rowH;
+  }
+  function courseTotalRow(){
+    const h=22;
+    rect(M,Y,CW,h,C.pale);
+    stroke(M,Y,M+CW,Y,C.navy,1.0);
+    label('TOTAL COMPLETED CREDITS',M+8,Y+15,8.6,C.navy,true);
+    label(`${n(totals().credits)} / 130`,M+CW-8,Y+16,12,C.green,true,'right');
+    Y+=h;
+  }
+  const planWidths=[35,344.28,51,90];
+  function planHeader(){tableHeader(['SL.','COURSE','CR.','TYPE'],planWidths,24,7.6);}
+  function drawPlanRow(c,index){
+    const name=displayCourseName(c);
+    const lines=splitLines(name,planWidths[1]-18,9.3,false);
+    const h=Math.max(34,10+lines.length*11.6);
+    // A fourteenth single-credit selection still fits comfortably on page 2.
+    rect(M,Y,CW,h,index%2?C.lighter:C.white);
+    drawCellText([String(index+1)],M,planWidths[0],Y,h,8.8,C.navy,true);
+    const map={'#009C42':'#16663D','#7135A2':'#774AAB','#F02020':'#A92F3C','#DB7000':'#A75B25','#8F2929':'#803943'};
+    drawCellText(lines,M+planWidths[0],planWidths[1],Y,h,9.3,map[(c.courseColor||'').toUpperCase()]||C.ink,false,true,11.6);
+    drawCellText([n(c.credits)],M+planWidths[0]+planWidths[1],planWidths[2],Y,h,9.1,C.navy,true);
+    drawCellText([checkedIds.has(c.id)?'RETAKE':'NEW'],M+planWidths[0]+planWidths[1]+planWidths[2],planWidths[3],Y,h,8.4,checkedIds.has(c.id)?C.burgundy:C.green,true);
+    let x=M;
+    planWidths.slice(0,-1).forEach(w=>{x+=w;stroke(x,Y,x,Y+h,C.line,.4);});
+    stroke(M,Y+h,M+CW,Y+h,C.line,.4);
+    Y+=h;
+  }
+  function planTotalRow(){
+    const h=34;
+    rect(M,Y,CW,h,C.lightGreen);
+    stroke(M,Y,M+CW,Y,C.green,1.2);
+    label('TOTAL PRE-ADVISED CREDITS',M+12,Y+22,9,C.navy,true);
+    label(`${n(plannedCreditTotal())} / 14`,M+CW-12,Y+23,14.5,C.green,true,'right');
+    Y+=h;
+  }
+  // Always use exactly two A4 pages: complete course progress on page 1;
+  // pre-advising only on page 2. No print dialog is involved.
+  newPage('progress');
+  sectionTitle('01   SEMESTER-WISE COURSE PROGRESS');
+  courseHeader();
+  COURSES.forEach(drawCourse);
+  courseTotalRow();
+
+  newPage('plan');
+  sectionTitle('02   PLANNED COURSES');
+  planHeader();
+  const planCourses=preAdvisedIds.map(id=>courseById.get(id)).filter(Boolean);
+  if(planCourses.length)planCourses.forEach(drawPlanRow);
+  else {
+    rect(M,Y,CW,48,C.lighter);
+    label('No courses added to pre-advising.',M+15,Y+28,9.2,C.muted);
+    Y+=48;
+  }
+  planTotalRow();
+  // Draw page footers after the page count is known.
+  pages.forEach((p,i)=>{
+    commands=p;
+    stroke(M,801,W-M,801,C.line,.8);
+    label('NSU  /  ECE Curriculum  /  '+activeDepartment,M,816,7.6,C.muted);
+    label(`Page ${i+1} of ${pages.length}`,W-M,816,7.6,C.muted,false,'right');
+  });
+  // A minimal, standards-compliant PDF 1.4 writer, using Helvetica fonts.
+  const objects=[];
+  function addObject(value){objects.push(value);return objects.length;}
+  const fontRegular=addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>');
+  const fontBold=addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
+  const pageTree=addObject('');
+  const pageIds=[];
+  pages.forEach(page=>{
+    const content=page.join('\n')+'\n';
+    const stream=addObject(`<< /Length ${content.length} >>\nstream\n${content}endstream`);
+    const ref=addObject(`<< /Type /Page /Parent ${pageTree} 0 R /MediaBox [0 0 ${num(W)} ${num(H)}] /Resources << /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >> >> /Contents ${stream} 0 R >>`);
+    pageIds.push(ref);
+  });
+  objects[pageTree-1]=`<< /Type /Pages /Kids [${pageIds.map(id=>id+' 0 R').join(' ')}] /Count ${pageIds.length} >>`;
+  const info=addObject(`<< /Title (${escapePdf('ECE Course Tracker - '+activeDepartment+' Progress Report')}) /Creator (ECE Online Course Tracker) >>`);
+  const root=addObject(`<< /Type /Catalog /Pages ${pageTree} 0 R >>`);
+  let documentText='%PDF-1.4\n';
+  const offsets=[0];
+  objects.forEach((body,i)=>{
+    offsets.push(documentText.length);
+    documentText+=`${i+1} 0 obj\n${body}\nendobj\n`;
+  });
+  const startXref=documentText.length;
+  documentText+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n`;
+  for(let i=1;i<offsets.length;i++)documentText+=String(offsets[i]).padStart(10,'0')+' 00000 n \n';
+  documentText+=`trailer\n<< /Size ${objects.length+1} /Root ${root} 0 R /Info ${info} 0 R >>\nstartxref\n${startXref}\n%%EOF\n`;
+  const blob=new Blob([documentText],{type:'application/pdf'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=`ECE_Course_Tracker_${activeDepartment}_${dateSlug}.pdf`;
+  document.body.append(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),60000);
+  toast(`A4 report downloaded - ${pages.length} page${pages.length===1?'':'s'}`,'success');
+}
+
+function exportProgressJpeg() {
+  const W=1600, M=60, CW=W-2*M;
+  const C={
+    bg:'#FFFFFF', navy:'#223B53', ink:'#26364A', muted:'#718093', burgundy:'#AC3448',
+    pale:'#F1F5F8', line:'#D6DEE5', white:'#FFFFFF', lightGreen:'#E4F3E9', green:'#18724C',
+    lightAmber:'#FFF1D4', amber:'#9E641D', lighter:'#F9FBFC', pill:'#EAF6EE', danger:'#A92F3C'
+  };
+  const departments={CSE:'Computer Science & Engineering',EEE:'Electrical & Electronic Engineering'};
+  const date=new Date();
+  const generated=date.toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'});
+  const dateSlug=[date.getFullYear(),String(date.getMonth()+1).padStart(2,'0'),String(date.getDate()).padStart(2,'0')].join('-');
+  const courseWidths=[92,655,80,110,110,433];
+  const planWidths=[86,1014,100,220];
+  const canvas=document.createElement('canvas');
+  const measureContext=canvas.getContext('2d');
+  const clean=s=>String(s??'').replace(/[\r\n\t]+/g,' ').replace(/\s+/g,' ').trim();
+  const setFont=(size,bold=false)=>{measureContext.font=`${bold?'700':'400'} ${size}px Arial, sans-serif`;};
+  const tw=(value,size,bold=false)=>{setFont(size,bold);return measureContext.measureText(clean(value)).width;};
+  function splitLines(value,available,size,bold=false){
+    const words=clean(value).split(' ');
+    const lines=[]; let line='';
+    for(const originalWord of words){
+      if(!originalWord)continue;
+      let word=originalWord;
+      while(tw(word,size,bold)>available && word.length>1){
+        let head='';
+        for(const ch of word){ if(head && tw(head+ch,size,bold)>available)break; head+=ch; }
+        if(line){lines.push(line); line='';}
+        lines.push(head); word=word.slice(head.length);
+      }
+      if(!word)continue;
+      if(!line){line=word; continue;}
+      const candidate=line+' '+word;
+      if(tw(candidate,size,bold)<=available)line=candidate;
+      else{lines.push(line); line=word;}
+    }
+    if(line)lines.push(line);
+    return lines.length?lines:[''];
+  }
+
+  const courseLayout=COURSES.map(course=>{
+    const titleLines=splitLines(displayCourseName(course),courseWidths[1]-24,24,false);
+    const reqLines=splitLines(course.prerequisite,courseWidths[5]-20,18,false);
+    return {
+      titleLines, reqLines,
+      h:Math.max(56,18+Math.max(titleLines.length*29,reqLines.length*23))
+    };
+  });
+  const planCourses=preAdvisedIds.map(id=>courseById.get(id)).filter(Boolean);
+  const planLayout=planCourses.map(course=>{
+    const lines=splitLines(displayCourseName(course),planWidths[1]-24,24,false);
+    return {lines,h:Math.max(58,22+lines.length*29)};
+  });
+
+  const courseRowsHeight=courseLayout.reduce((sum,row)=>sum+row.h,0);
+  const planRowsHeight=planLayout.reduce((sum,row)=>sum+row.h,0) || 70;
+  const H=70+42+22+92+18+26+46+courseRowsHeight+54+52+44+34+84+46+planRowsHeight+58+90;
+  const scale=H>5200?1.2:1.5;
+  canvas.width=Math.round(W*scale); canvas.height=Math.round(H*scale);
+  const ctx=canvas.getContext('2d'); ctx.scale(scale,scale);
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+  ctx.textBaseline='alphabetic';
+  ctx.lineJoin='round';
+  ctx.lineCap='round';
+
+  const rounded=(x,y,w,h,r,fill,stroke,width=1)=>{
+    ctx.beginPath();
+    ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+    if(fill){ctx.fillStyle=fill; ctx.fill();}
+    if(stroke){ctx.strokeStyle=stroke; ctx.lineWidth=width; ctx.stroke();}
+  };
+  const line=(x1,y1,x2,y2,color,width=1)=>{ctx.strokeStyle=color; ctx.lineWidth=width; ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();};
+  const text=(value,x,y,size,color=C.ink,bold=false,align='left')=>{ctx.font=`${bold?'700':'400'} ${size}px Arial, sans-serif`; ctx.fillStyle=color; ctx.textAlign=align; ctx.fillText(clean(value),x,y);};
+  const wrapped=(value,x,y,width,size,color=C.ink,bold=false,align='left',leading=null)=>{
+    const lines=splitLines(value,width,size,bold);
+    const step=leading||Math.round(size*1.26);
+    lines.forEach((lineText,i)=>text(lineText,align==='left'?x:(align==='center'?x+width/2:x+width),y+i*step,size,color,bold,align));
+    return lines.length;
+  };
+  const circleMark=(cx,cy,r,fill,stroke,width=2)=>{
+    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
+    if(fill){ctx.fillStyle=fill; ctx.fill();}
+    if(stroke){ctx.strokeStyle=stroke; ctx.lineWidth=width; ctx.stroke();}
+  };
+  const checkbox=(cx,cy,checked)=>{
+    const r=12;
+    circleMark(cx,cy,r,checked?C.green:C.white,checked?C.green:C.muted,2);
+    if(checked){
+      ctx.strokeStyle=C.white; ctx.lineWidth=4; ctx.beginPath();
+      ctx.moveTo(cx-6,cy); ctx.lineTo(cx-1,cy+6); ctx.lineTo(cx+8,cy-7); ctx.stroke();
+    }
+  };
+
+  let y=58;
+  text('NORTH SOUTH UNIVERSITY  /  ECE CURRICULUM',M,y,15,C.muted,true);
+  text(activeDepartment+' / COURSE PROGRESS AND PRE-ADVISING',W-M,y,15,C.burgundy,true,'right');
+  y+=18;
+  rounded(M,y,CW,5,2,C.burgundy);
+  y+=50;
+  text('Course Progress and Pre-Advising',M,y,42,C.navy,true);
+  y+=28;
+  text(`${activeDepartment} - ${departments[activeDepartment]}`,M,y,20,C.muted);
+  text(`Generated ${generated}`,W-M,y,18,C.muted,false,'right');
+  y+=40;
+
+  const done=totals();
+  const progress=done.credits/130*100;
+  const metrics=[
+    ['COMPLETED CREDITS',n(done.credits)],
+    ['REMAINING CREDITS',n(Math.max(0,130-done.credits))],
+    ['COURSES FINISHED',`${done.finished} / ${COURSES.length}`],
+    ['DEGREE COMPLETED',`${(Math.round(progress*10)/10).toFixed(1)}%`]
+  ];
+  const gap=16, boxW=(CW-gap*3)/4;
+  metrics.forEach(([heading,value],i)=>{
+    const x=M+i*(boxW+gap);
+    rounded(x,y,boxW,82,16,i===0?C.navy:C.pale,i===0?C.navy:C.line,1);
+    text(heading,x+18,y+28,14,i===0?C.white:C.muted,true);
+    text(value,x+18,y+63,32,i===0?C.white:C.navy,true);
+  });
+  y+=102;
+  rounded(M,y,CW,10,5,C.line);
+  rounded(M,y,Math.max(10,CW*Math.max(0,Math.min(1,done.credits/130))),10,5,C.green);
+  y+=30;
+  text(`${n(done.credits)} of 130 credits completed`,M,y,17,C.muted);
+  rounded(W-M-228,y-16,14,14,4,C.lightGreen,C.lightGreen);
+  text('Completed',W-M-206,y,16,C.muted);
+  rounded(W-M-112,y-16,14,14,4,C.lightAmber,C.lightAmber);
+  text('Pre-advised',W-M-90,y,16,C.muted);
+  y+=46;
+
+  text('Semester-wise Course Progress',M,y,28,C.navy,true);
+  y+=18;
+  rounded(M,y,CW,46,12,C.navy,C.navy);
+  let x=M;
+  [['SEM.',courseWidths[0]],['COURSE',courseWidths[1]],['CR.',courseWidths[2]],['DONE',courseWidths[3]],['CR/SEM.',courseWidths[4]],['PREREQUISITES',courseWidths[5]]].forEach(([label,width],i)=>{
+    text(label,i===1?x+16:x+width/2,y+30,16,C.white,true,i===1?'left':'center');
+    x+=width;
+  });
+  y+=46;
+
+  const courseColorMap={'#009C42':'#16663D','#7135A2':'#774AAB','#F02020':'#A92F3C','#DB7000':'#A75B25','#8F2929':'#803943'};
+  COURSES.forEach((course,index)=>{
+    const layout=courseLayout[index];
+    const rowH=layout.h;
+    const completed=checkedIds.has(course.id);
+    const planned=preAdvisedIds.includes(course.id);
+    const bg=planned?C.lightAmber:(completed?C.lightGreen:(index%2?C.lighter:C.white));
+    ctx.fillStyle=bg; ctx.fillRect(M,y,CW,rowH);
+    if(course.startOfSemester)line(M,y,M+CW,y,C.navy,1.3);
+    let cx=M;
+    [courseWidths[0],courseWidths[1],courseWidths[2],courseWidths[3],courseWidths[4]].forEach(width=>{cx+=width; line(cx,y,cx,y+rowH,C.line,1);});
+    line(M,y+rowH,M+CW,y+rowH,C.line,1);
+    if(course.startOfSemester)text(course.semLabel,M+courseWidths[0]/2,y+rowH/2+8,20,C.navy,true,'center');
+    const titleColor=planned?C.ink:(courseColorMap[(course.courseColor||'').toUpperCase()]||C.ink);
+    const titleStart=y+(rowH-(layout.titleLines.length*29-5))/2+22;
+    layout.titleLines.forEach((lineText,i)=>text(lineText,M+courseWidths[0]+16,titleStart+i*29,24,titleColor,false));
+    text(n(course.credits),M+courseWidths[0]+courseWidths[1]+courseWidths[2]/2,y+rowH/2+8,20,C.navy,true,'center');
+    checkbox(M+courseWidths[0]+courseWidths[1]+courseWidths[2]+courseWidths[3]/2,y+rowH/2,completed);
+    if(course.startOfSemester)text(n(course.semesterCredits),M+courseWidths[0]+courseWidths[1]+courseWidths[2]+courseWidths[3]+courseWidths[4]/2,y+rowH/2+8,20,C.navy,true,'center');
+    const reqStart=y+(rowH-(layout.reqLines.length*23-5))/2+18;
+    layout.reqLines.forEach((lineText,i)=>text(lineText,M+courseWidths[0]+courseWidths[1]+courseWidths[2]+courseWidths[3]+courseWidths[4]+12,reqStart+i*23,18,C.muted,false));
+    y+=rowH;
+  });
+
+  rounded(M,y,CW,54,12,C.pale,C.line);
+  text('TOTAL COMPLETED CREDITS',M+18,y+35,20,C.navy,true);
+  text(`${n(done.credits)} / 130`,W-M-18,y+36,28,C.green,true,'right');
+  y+=86;
+
+  text('Pre-Advising Plan',M,y,30,C.navy,true);
+  y+=18;
+  const totalPlanned=plannedCreditTotal();
+  const planMetrics=[['PLANNED CREDITS',`${n(totalPlanned)} / 14`],['CREDITS AVAILABLE',n(Math.max(0,14-totalPlanned))],['PLANNED COURSES',String(planCourses.length)]];
+  const planGap=18, planBoxW=(CW-planGap*2)/3;
+  planMetrics.forEach(([heading,value],i)=>{
+    const x0=M+i*(planBoxW+planGap);
+    rounded(x0,y,planBoxW,84,16,i===0?C.navy:C.pale,i===0?C.navy:C.line,1);
+    text(heading,x0+18,y+30,15,i===0?C.white:C.muted,true);
+    text(value,x0+18,y+66,34,i===0?C.white:C.navy,true);
+  });
+  y+=114;
+  rounded(M,y,CW,46,12,C.navy,C.navy);
+  x=M;
+  [['SL.',planWidths[0]],['COURSE',planWidths[1]],['CR.',planWidths[2]],['TYPE',planWidths[3]]].forEach(([label,width],i)=>{
+    text(label,i===1?x+16:x+width/2,y+30,16,C.white,true,i===1?'left':'center');
+    x+=width;
+  });
+  y+=46;
+
+  if(planCourses.length){
+    planCourses.forEach((course,index)=>{
+      const layout=planLayout[index], rowH=layout.h;
+      ctx.fillStyle=index%2?C.lighter:C.white; ctx.fillRect(M,y,CW,rowH);
+      let cx=M; [planWidths[0],planWidths[1],planWidths[2]].forEach(width=>{cx+=width; line(cx,y,cx,y+rowH,C.line,1);});
+      line(M,y+rowH,M+CW,y+rowH,C.line,1);
+      text(String(index+1),M+planWidths[0]/2,y+rowH/2+8,20,C.navy,true,'center');
+      const titleColor=courseColorMap[(course.courseColor||'').toUpperCase()]||C.ink;
+      const start=y+(rowH-(layout.lines.length*29-5))/2+22;
+      layout.lines.forEach((lineText,i)=>text(lineText,M+planWidths[0]+16,start+i*29,24,titleColor,false));
+      text(n(course.credits),M+planWidths[0]+planWidths[1]+planWidths[2]/2,y+rowH/2+8,20,C.navy,true,'center');
+      const pillText=checkedIds.has(course.id)?'RETAKE':'NEW';
+      const pillColor=checkedIds.has(course.id)?C.amber:C.green;
+      const pillBg=checkedIds.has(course.id)?'#FFF0CC':C.pill;
+      const pillW=tw(pillText,18,true)+34, pillH=34, pillX=M+planWidths[0]+planWidths[1]+planWidths[2]+(planWidths[3]-pillW)/2, pillY=y+(rowH-pillH)/2;
+      rounded(pillX,pillY,pillW,pillH,17,pillBg,pillBg);
+      text(pillText,pillX+pillW/2,pillY+24,18,pillColor,true,'center');
+      y+=rowH;
+    });
+  }else{
+    ctx.fillStyle=C.lighter; ctx.fillRect(M,y,CW,70);
+    text('No courses added to pre-advising.',M+18,y+43,21,C.muted);
+    y+=70;
+  }
+  rounded(M,y,CW,58,12,C.lightGreen,C.green,1.2);
+  text('TOTAL PRE-ADVISED CREDITS',M+18,y+38,21,C.navy,true);
+  text(`${n(totalPlanned)} / 14`,W-M-18,y+39,30,C.green,true,'right');
+  y+=108;
+  line(M,y-26,W-M,y-26,C.line,1.2);
+  text('NSU / ECE Curriculum / '+activeDepartment,M,y,16,C.muted);
+  text('Generated by ECE Online Course Tracker',W-M,y,16,C.muted,false,'right');
+
+  const filename=`ECE_Course_Tracker_${activeDepartment}_${dateSlug}.jpg`;
+  const finish=(url)=>{
+    const a=document.createElement('a');
+    a.href=url; a.download=filename; document.body.append(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),60000);
+    toast('JPEG report downloaded','success');
+  };
+  if(canvas.toBlob){
+    canvas.toBlob(blob=>{
+      if(!blob){toast('JPEG export failed. Please retry.','error');return;}
+      finish(URL.createObjectURL(blob));
+    },'image/jpeg',0.94);
+  }else{
+    const a=document.createElement('a');
+    a.href=canvas.toDataURL('image/jpeg',0.94); a.download=filename; document.body.append(a); a.click(); a.remove();
+    toast('JPEG report downloaded','success');
+  }
+}
+
+byId('exportJpegBtn').addEventListener('click',()=>{
+  try{exportProgressJpeg();}
+  catch(error){console.error('JPEG export failed:',error);toast('JPEG export failed. Please retry.','error');}
+});
+
 byId('exportPdfBtn').addEventListener('click',()=>{
-  // All current checkbox/plan values are already rendered synchronously on every edit.
-  updateTotals();renderPlanner();
-  toast('Save as PDF · A4 portrait · enable Background graphics for colors.','info');
-  window.print();
+  try{exportProgressPdf();}
+  catch(error){console.error('PDF export failed:',error);toast('PDF export failed. Please retry.','error');}
 });
 byId('importBtn').addEventListener('click',()=>byId('importInput').click());
 byId('importInput').addEventListener('change',importPreviousHtml);
